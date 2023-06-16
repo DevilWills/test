@@ -1,0 +1,401 @@
+using Newtonsoft.Json;
+using Oxide.Core.Libraries.Covalence;
+using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
+using Oxide.Plugins;
+using Rust;
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Oxide.Plugins
+{
+    [Info("JournalPlugin", "Mr Will", "1.0.1")]
+    [Description("Affiche un message dans un menu graphique en fonction de la permission du joueur")]
+
+    class JournalPlugin : CovalencePlugin
+    {
+        private ConfigData configData;
+
+        #region Configuration
+
+        protected override void LoadDefaultConfig()
+        {
+            Config.WriteObject(GetDefaultConfig(), true);
+        }
+        private Dictionary<string, bool> playerClosedMenus = new Dictionary<string, bool>();
+        private ConfigData GetDefaultConfig()
+        {
+            return new ConfigData
+            {
+                PanelWidth = 0.4f,
+                ButtonWidth = 0.125f, // Increased button width by 25%
+                ButtonHeight = 0.0625f, // Increased button height by 25%
+                CloseButtonXPosition = 0.5f,
+                CloseButtonYPosition = 0.05f,
+                TitleXPosition = 0.5f,
+                TitleYPosition = 0.95f,
+                BackgroundColor = "0.1 0.1 0.1 0.8",
+                MessageBackgroundColor = "0.05 0.05 0.05 0.8",
+                ButtonColor = "0.8 0.2 0.2 1",
+                TextColor = "0.98 0.65 0.22 1",
+
+                PermissionMessages = new List<PermissionMessage>
+                {
+                    new PermissionMessage
+                    {
+                        Permission = "journalplugin.admin",
+                        Message = "Contenu du journal pour les administrateurs.",
+                        QuestItem = null,
+                        QuestItemSkin = null
+                    },
+                    new PermissionMessage
+                    {
+                        Permission = "journalplugin.vip",
+                        Message = "Contenu du journal pour les VIP.",
+                        QuestItem = null,
+                        QuestItemSkin = null
+                    },
+                    new PermissionMessage
+                    {
+                        Permission = "journalplugin.default",
+                        Message = "Contenu du journal pour les joueurs normaux.",
+                        QuestItem = null,
+                        QuestItemSkin = null
+                    },
+                    new PermissionMessage
+                    {
+                        Permission = "journalplugin.custom",
+                        Message = "Contenu du journal pour la permission personnalisée.",
+                        QuestItem = null,
+                        QuestItemSkin = null
+                    }
+                }
+            };
+        }
+
+
+class ConfigData
+{
+    [JsonProperty("PanelWidth")]
+    public float PanelWidth;
+
+    [JsonProperty("ButtonWidth")]
+    public float ButtonWidth;
+
+    [JsonProperty("ButtonHeight")]
+    public float ButtonHeight;
+
+    [JsonProperty("BackgroundColor")]
+    public string BackgroundColor;
+
+    [JsonProperty("MessageBackgroundColor")]
+    public string MessageBackgroundColor;
+
+    [JsonProperty("ButtonColor")]
+    public string ButtonColor;
+
+    [JsonProperty("TextColor")]
+    public string TextColor;
+    
+    [JsonProperty("CloseButtonXPosition")]
+    public float CloseButtonXPosition;
+
+    [JsonProperty("CloseButtonYPosition")]
+    public float CloseButtonYPosition;
+
+    [JsonProperty("TitleXPosition")]
+    public float TitleXPosition;
+
+    [JsonProperty("TitleYPosition")]
+    public float TitleYPosition;
+
+    [JsonProperty("PermissionMessages")]
+    public List<PermissionMessage> PermissionMessages;
+}
+
+        class PermissionMessage
+        {
+            [JsonProperty("Permission")]
+            public string Permission;
+
+            [JsonProperty("Message")]
+            public string Message;
+
+            [JsonProperty("QuestItem")]
+            public string QuestItem { get; set; }
+
+            [JsonProperty("QuestItemSkin")]
+            public ulong? QuestItemSkin { get; set; }
+        }
+
+        #endregion
+
+
+private const int MessagesPerPage = 3; // Nombre de messages à afficher par page
+private Dictionary<string, int> playerPageIndexes = new Dictionary<string, int>();
+private Dictionary<string, float> playerLastRefreshTimes = new Dictionary<string, float>();
+
+void Init()
+{
+    configData = Config.ReadObject<ConfigData>();
+
+    foreach (var permissionMessage in configData.PermissionMessages)
+    {
+        permission.RegisterPermission(permissionMessage.Permission, this);
+    }
+}
+
+void Unload()
+{
+    foreach(IPlayer player in players.Connected)
+    {
+        var basePlayer = player.Object as BasePlayer;
+        if (basePlayer == null) continue;
+
+        CuiHelper.DestroyUi(basePlayer, "JournalUI");
+    }
+}
+
+[Command("journal")]
+private void JournalCommand(IPlayer player, string command, string[] args)
+{
+    playerPageIndexes[player.Id] = 0; // Réinitialisez l'index de la page lorsque la commande est utilisée
+
+    List<string> messages = GetJournalMessagesForPlayer(player);
+    if (messages.Count > 0)
+    {
+        ShowJournalUI(player, messages);
+    }
+    else
+    {
+        player.Reply("Aucun message de journal disponible pour votre permission.");
+    }
+    playerLastRefreshTimes[player.Id] = UnityEngine.Time.time;
+    playerClosedMenus[player.Id] = false;
+
+}
+
+private List<string> GetJournalMessagesForPlayer(IPlayer player)
+{
+    List<string> allMessages = new List<string>();
+    foreach (var permissionMessage in configData.PermissionMessages)
+    {
+        if (player.HasPermission(permissionMessage.Permission))
+        {
+            string message = permissionMessage.Message;
+            if (message.Contains("{progression}") && permissionMessage.QuestItem != null && permissionMessage.QuestItemSkin != null)
+            {
+                float? condition = GetPlayerItemCondition(player, permissionMessage.QuestItem, permissionMessage.QuestItemSkin.Value);
+                message = condition != null 
+                    ? message.Replace("{progression}", $"votre {permissionMessage.QuestItem} est à {condition.Value}%") 
+                    : message.Replace("{progression}", $"votre {permissionMessage.QuestItem} n'est pas trouvé dans votre inventaire");
+                            }
+            allMessages.Add(message);
+        }
+    }
+
+    // Return only messages for specified page
+    int start = playerPageIndexes[player.Id] * MessagesPerPage;
+    int end = Math.Min(start + MessagesPerPage, allMessages.Count);
+
+    if (start < allMessages.Count)
+    {
+        return allMessages.GetRange(start, end - start);
+    }
+
+    return new List<string>(); // if start >= allMessages.Count, it means we're out of bounds, return empty list
+}
+
+private const float RefreshInterval = 7.0f;
+
+
+private float? GetPlayerItemCondition(IPlayer player, string itemName, ulong skinId)
+{
+    var basePlayer = player.Object as BasePlayer;
+    if (basePlayer == null) return null;
+
+    foreach (Item item in basePlayer.inventory.AllItems())
+    {
+        if (item.info.shortname.Equals(itemName, StringComparison.OrdinalIgnoreCase) &&
+            item.skin == skinId)
+        {
+            float maxCondition = item.info.condition.max;
+            float conditionPercent = (item.condition / maxCondition) * 100f;
+
+            // Return the condition reduced by 10%
+            return conditionPercent * 1.0f; // 90% of the original condition
+        }
+    }
+
+    return null;
+}
+
+private Vector2 GetTextSize(string text, int fontSize)
+{
+    Font font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+    int width = 0;
+    int height = 0;
+
+    foreach (char c in text)
+    {
+        CharacterInfo characterInfo;
+        font.RequestCharactersInTexture(c.ToString(), fontSize);
+        font.GetCharacterInfo(c, out characterInfo, fontSize);
+
+        width += characterInfo.advance;
+        height = Mathf.Max(height, characterInfo.glyphHeight);
+    }
+
+    return new Vector2(width, height);
+}
+private void ShowJournalUI(IPlayer player, List<string> messages)
+{
+    var basePlayer = player.Object as BasePlayer;
+    if (basePlayer == null) return;
+
+    // Détruire les anciennes instances de l'interface utilisateur du journal
+    CuiHelper.DestroyUi(basePlayer, "JournalUI");
+
+    float panelHeight = (0.40f + 4 * 0.05f) * 0.65f; // Use always 3 slots for messages
+    float panelWidth = configData.PanelWidth * 0.70f;
+
+    CuiElementContainer container = new CuiElementContainer();
+    string panelName = "JournalUI";
+
+    // Background
+    container.Add(new CuiPanel
+    {
+        Image = { Color = configData.BackgroundColor },
+        RectTransform = { AnchorMin = $"{1.0f - panelWidth} {0.5f - panelHeight / 2}", AnchorMax = $"{0.98f} {0.5f + panelHeight / 2}" }
+    }, "Overlay", panelName);
+
+    // Messages
+    float messageYPosition = 0.85f;
+    float messageSpacing = 0.25f; // Augmentez cette valeur pour augmenter l'espacement des quêtes
+    float textBorder = 0.02f; 
+
+float leftBorder = 0.025f;
+float rightBorder = 0.970f;
+
+    // Créez une liste avec les messages par défaut
+    List<string> defaultMessageList = new List<string> { "", "", "", "" };
+    messages.AddRange(defaultMessageList);
+
+    // Affichez les trois premiers messages de la liste
+for (int i = 0; i < 4; i++)
+{
+    string message = messages[i];
+
+
+        // Message text
+        container.Add(new CuiLabel
+        {
+            Text = { Text = message, FontSize = 18, Align = TextAnchor.MiddleLeft, Color = configData.TextColor },
+            RectTransform = { AnchorMin = $"{leftBorder + textBorder} {messageYPosition - messageSpacing}", AnchorMax = $"{rightBorder - textBorder} {messageYPosition}" }
+        }, panelName);
+
+        messageYPosition -= messageSpacing;
+    }
+// Bouton précédent
+container.Add(new CuiButton
+{
+    Button = { Command = "journal.previous", Color = configData.ButtonColor },
+    RectTransform = { AnchorMin = "0.025 0.02", AnchorMax = "0.10 0.08" }, // Redimensionner et déplacer le bouton
+    Text = { Text = "<", FontSize = 14, Align = TextAnchor.MiddleCenter } // Augmenter la taille de la police
+}, panelName);
+
+// Bouton suivant
+container.Add(new CuiButton
+{
+    Button = { Command = "journal.next", Color = configData.ButtonColor },
+    RectTransform = { AnchorMin = "0.90 0.02", AnchorMax = "0.975 0.08" }, // Redimensionner et déplacer le bouton
+    Text = { Text = ">", FontSize = 14, Align = TextAnchor.MiddleCenter } // Augmenter la taille de la police
+}, panelName);
+
+// Close button
+float buttonWidth = configData.ButtonWidth;
+float buttonHeight = configData.ButtonHeight;
+float centerXPosition = 0.5f;
+float bottomYPosition = 0.05f;
+container.Add(new CuiButton
+{
+    Button = { Command = "journal.close", Color = configData.ButtonColor },
+    RectTransform = { AnchorMin = $"{centerXPosition - buttonWidth * 1.05f / 2} {bottomYPosition - buttonHeight * 1.05f / 2}", AnchorMax = $"{centerXPosition + buttonWidth * 1.05f / 2} {bottomYPosition + buttonHeight * 1.05f / 2}" },
+    Text = { Text = "FERMER", FontSize = 7, Align = TextAnchor.MiddleCenter,Color = "1 1 1 1" }
+}, panelName);
+    // Title
+    float titleXPosition = configData.TitleXPosition;
+    float titleYPosition = configData.TitleYPosition * 0.99f; // Reduce by 5%
+    container.Add(new CuiLabel
+        {
+            Text = { Text = "<color=#E96C41>JOURNAL DE QUÊTES</color>", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = configData.TextColor },
+            RectTransform = { AnchorMin = $"{titleXPosition - 0.5} {titleYPosition - 0.05}", AnchorMax = $"{titleXPosition + 0.5} {titleYPosition + 0.05}" }
+        }, panelName);
+    CuiHelper.AddUi(basePlayer, container);
+
+    }
+[Command("journal.next")]
+private void NextJournalCommand(IPlayer player, string command, string[] args)
+{
+    if (playerPageIndexes.ContainsKey(player.Id))
+    {
+        playerPageIndexes[player.Id]++; // Increment first
+        List<string> messages = GetJournalMessagesForPlayer(player);
+        if (messages.Count > 0)
+        {
+            CuiHelper.DestroyUi((BasePlayer)player.Object, "JournalUI");
+            ShowJournalUI(player, messages);
+        }
+        else
+        {
+            playerPageIndexes[player.Id]--; // Decrement if no messages are left
+        }
+    }
+}
+        
+        [Command("journal.previous")]
+        private void PreviousJournalCommand(IPlayer player, string command, string[] args)
+        {
+            if (playerPageIndexes.ContainsKey(player.Id) && playerPageIndexes[player.Id] > 0)
+            {
+                playerPageIndexes[player.Id]--;
+                List<string> messages = GetJournalMessagesForPlayer(player);
+                if (messages.Count > 0)
+                {
+                    CuiHelper.DestroyUi((BasePlayer)player.Object, "JournalUI");
+                    ShowJournalUI(player, messages);
+                }
+            }
+        }
+
+private Dictionary<string, bool> playerClosingMenus = new Dictionary<string, bool>();
+
+[Command("journal.close")]
+private void CloseJournalCommand(IPlayer player, string command, string[] args)
+{
+    var basePlayer = player.Object as BasePlayer;
+    if (basePlayer == null) return;
+
+    playerClosingMenus[player.Id] = true; // Le joueur est en train de fermer le menu
+    CuiHelper.DestroyUi(basePlayer, "JournalUI");
+    playerLastRefreshTimes.Remove(player.Id);
+    playerClosedMenus[player.Id] = false; // Le menu est fermé
+}
+
+void OnTick()
+{
+    foreach(var player in players.Connected)
+    {
+        if (playerLastRefreshTimes.ContainsKey(player.Id) && 
+            UnityEngine.Time.time - playerLastRefreshTimes[player.Id] >= RefreshInterval && 
+            (!playerClosedMenus.ContainsKey(player.Id) || !playerClosedMenus[player.Id])) // Vérifiez si le menu est ouvert
+        {
+            List<string> messages = GetJournalMessagesForPlayer(player);
+            if (messages.Count > 0)
+            {
+                ShowJournalUI(player, messages); // Cela fermera d'abord l'ancien menu avant d'en créer un nouveau
+            }
+        }
+    }
+}}}
